@@ -31,6 +31,7 @@ int lastFeedDayEvening = -1;
 
 // Last feed activity capture (numeric only)
 int lastMotionScore     = -1;
+int feedSequence        = 0;   // increments every time a feed happens
 
 // Camera pin config for XIAO ESP32S3 Sense
 #define PWDN_GPIO_NUM     -1
@@ -92,12 +93,15 @@ void performFeedWithCapture() {
   }
 
   lastMotionScore = computeMotionScore(before, after);
+  feedSequence++;
 
   esp_camera_fb_return(before);
   esp_camera_fb_return(after);
 
   Serial.print("[FEED] Motion score: ");
   Serial.println(lastMotionScore);
+  Serial.print("[FEED] Sequence: ");
+  Serial.println(feedSequence);
 }
 
 // ====== CAMERA ======
@@ -213,7 +217,8 @@ void handleStatus() {
   json += "\"fedToday\":" + String(lastFeedDayEvening == now.day() ? "true" : "false") + "},";
 
   json += "\"lastFeed\":{";
-  json += "\"motionScore\":" + String(lastMotionScore);
+  json += "\"motionScore\":" + String(lastMotionScore) + ",";
+  json += "\"seq\":" + String(feedSequence);
   json += "}}";
 
   server.send(200, "application/json", json);
