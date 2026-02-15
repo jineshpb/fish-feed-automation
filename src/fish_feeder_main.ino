@@ -1,6 +1,8 @@
 #include <WiFi.h>
 #include <WebServer.h>
 #include <ESP32Servo.h>
+#include <Wire.h>
+#include "RTClib.h"
 #include "esp_camera.h"
 
 // ====== CONFIG ======
@@ -15,6 +17,17 @@ const int SERVO_FEED_DELAY_MS = 800; // time to reach angle
 // ====== GLOBALS ======
 WebServer server(80);
 Servo feederServo;
+RTC_DS3231 rtc;  // real-time clock (DS3231)
+
+// Feed schedule: morning and evening at 09:00 and 21:00
+const int FEED_MORNING_HOUR = 9;
+const int FEED_MORNING_MIN  = 0;
+const int FEED_EVENING_HOUR = 21;
+const int FEED_EVENING_MIN  = 0;
+
+// Track last day we fed (so we don't double-feed)
+int lastFeedDayMorning = -1;
+int lastFeedDayEvening = -1;
 
 // Camera pin config for XIAO ESP32S3 Sense (may need tweaking to match Seeed example)
 #define PWDN_GPIO_NUM     -1
@@ -130,6 +143,17 @@ void setup() {
   feederServo.attach(SERVO_PIN);
   feederServo.write(SERVO_FEED_START);
 
+  // RTC
+  if (!rtc.begin()) {
+    Serial.println("[RTC] Failed to initialize RTC (DS3231)");
+  } else {
+    if (rtc.lostPower()) {
+      Serial.println("[RTC] RTC lost power, set the time in code once then remove this.");
+      // Example: set to compile time once, then disable this block after it sticks.
+      // rtc.adjust(DateTime(F(__DATE__), F(__TIME__)));
+    }
+  }
+
   // Camera
   if (!initCamera()) {
     Serial.println("Camera init failed, rebooting...");
@@ -159,5 +183,27 @@ void setup() {
 
 void loop() {
   server.handleClient();
-  // later: add scheduler here for automatic feeds
+
+  // Simple RTC-based scheduler: feed at 09:00 and 21:00 once per day
+  if (rtc.begin()) {
+    DateTime now = rtc.now();
+
+    // Morning feed
+    if (now.hour() == FEED_MORNING_HOUR && now.minute() == FEED_MORNING_MIN) {
+      if (lastFeedDayMorning != now.day()) {
+        Serial.println("[SCHED] Morning feed triggered");
+        performFeed();
+        lastFeedDayMorning = now.day();
+      }
+    }
+
+    // Evening feed
+    if (now.hour() == FEED_EVENING_HOUR && now.minute() == FEED_EVENING_MIN) {
+      if (lastFeedDayEvening != now.day()) {
+        Serial.println("[SCHED] Evening feed triggered");
+        performFeed();
+        lastFeedDayEvening = now.day();
+      }
+    }
+  }
 }

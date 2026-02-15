@@ -8,6 +8,8 @@ Single-brain automated fish feeder + camera using Seeed XIAO ESP32S3 Sense.
   - `GET /` → "Feed Now" button + latest snapshot.
   - `GET /feed-now` → triggers a feed event.
   - `GET /snapshot` → returns a JPEG from the camera.
+- DS3231 RTC-based schedule:
+  - Automatic feeds at 09:00 and 21:00 every day (once per slot).
 
 ## Hardware
 - Seeed Studio XIAO ESP32S3 Sense
