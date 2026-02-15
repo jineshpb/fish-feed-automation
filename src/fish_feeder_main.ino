@@ -3,10 +3,7 @@
 #include <ESP32Servo.h>
 #include <Wire.h>
 #include "RTClib.h"
-
-#define CAMERA_MODEL_XIAO_ESP32S3  // Has PSRAM
 #include "esp_camera.h"
-#include "camera_pins.h"
 
 // ====== CONFIG ======
 const char* WIFI_SSID     = "YOUR_SSID";
