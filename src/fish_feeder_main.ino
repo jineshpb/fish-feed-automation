@@ -29,9 +29,7 @@ const int FEED_EVENING_MIN  = 0;
 int lastFeedDayMorning = -1;
 int lastFeedDayEvening = -1;
 
-// Last feed activity capture
-camera_fb_t* lastBefore = nullptr;
-camera_fb_t* lastAfter  = nullptr;
+// Last feed activity capture (numeric only)
 int lastMotionScore     = -1;
 
 // Camera pin config for XIAO ESP32S3 Sense
@@ -54,11 +52,6 @@ int lastMotionScore     = -1;
 #define PCLK_GPIO_NUM     13
 
 // ====== FEEDING / ACTIVITY CAPTURE ======
-void freeLastFrames() {
-  if (lastBefore) { esp_camera_fb_return(lastBefore); lastBefore = nullptr; }
-  if (lastAfter)  { esp_camera_fb_return(lastAfter);  lastAfter  = nullptr; }
-}
-
 int computeMotionScore(camera_fb_t* a, camera_fb_t* b) {
   if (!a || !b) return -1;
   // v0 heuristic: difference in JPEG size
@@ -80,15 +73,28 @@ void performFeed() {
 }
 
 void performFeedWithCapture() {
-  Serial.println("[FEED] Capture before/after");
+  Serial.println("[FEED] Capture before/after (ephemeral)");
 
-  freeLastFrames();
-  lastBefore = esp_camera_fb_get();
+  camera_fb_t* before = esp_camera_fb_get();
+  if (!before) {
+    Serial.println("[FEED] Failed to get BEFORE frame");
+    performFeed();
+    return;
+  }
 
   performFeed();
 
-  lastAfter = esp_camera_fb_get();
-  lastMotionScore = computeMotionScore(lastBefore, lastAfter);
+  camera_fb_t* after = esp_camera_fb_get();
+  if (!after) {
+    Serial.println("[FEED] Failed to get AFTER frame");
+    esp_camera_fb_return(before);
+    return;
+  }
+
+  lastMotionScore = computeMotionScore(before, after);
+
+  esp_camera_fb_return(before);
+  esp_camera_fb_return(after);
 
   Serial.print("[FEED] Motion score: ");
   Serial.println(lastMotionScore);
@@ -184,28 +190,6 @@ void handleSnapshot() {
   esp_camera_fb_return(fb);
 }
 
-void handleLastBefore() {
-  if (!lastBefore) {
-    server.send(404, "text/plain", "No before frame yet");
-    return;
-  }
-  server.setContentLength(lastBefore->len);
-  server.send(200, "image/jpeg", "");
-  WiFiClient client = server.client();
-  client.write(lastBefore->buf, lastBefore->len);
-}
-
-void handleLastAfter() {
-  if (!lastAfter) {
-    server.send(404, "text/plain", "No after frame yet");
-    return;
-  }
-  server.setContentLength(lastAfter->len);
-  server.send(200, "image/jpeg", "");
-  WiFiClient client = server.client();
-  client.write(lastAfter->buf, lastAfter->len);
-}
-
 void handleStatus() {
   DateTime now = rtc.now();
   String json = "{";
@@ -290,8 +274,6 @@ void setup() {
   server.on("/", handleRoot);
   server.on("/feed-now", handleFeedNow);
   server.on("/snapshot", handleSnapshot);
-  server.on("/last-before", handleLastBefore);
-  server.on("/last-after", handleLastAfter);
   server.on("/status", handleStatus);
   server.on("/set-time", handleSetTime);
 
