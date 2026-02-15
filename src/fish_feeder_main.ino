@@ -3,13 +3,16 @@
 #include <ESP32Servo.h>
 #include <Wire.h>
 #include "RTClib.h"
+
+#define CAMERA_MODEL_XIAO_ESP32S3  // Has PSRAM
 #include "esp_camera.h"
+#include "camera_pins.h"
 
 // ====== CONFIG ======
 const char* WIFI_SSID     = "YOUR_SSID";
 const char* WIFI_PASSWORD = "YOUR_PASSWORD";
 
-const int SERVO_PIN = D2;      // adjust if needed
+const int SERVO_PIN = 2;       // GPIO 2 (PWM-capable)
 const int SERVO_FEED_START = 0;    // resting angle
 const int SERVO_FEED_END   = 180;  // 180° feed rotation
 const int SERVO_FEED_DELAY_MS = 800; // time to reach angle
@@ -85,15 +88,33 @@ bool initCamera() {
   config.pin_pwdn     = PWDN_GPIO_NUM;
   config.pin_reset    = RESET_GPIO_NUM;
   config.xclk_freq_hz = 20000000;
-  config.pixel_format = PIXFORMAT_JPEG;
 
-  config.frame_size   = FRAMESIZE_QVGA;
+  config.frame_size   = FRAMESIZE_UXGA;
+  config.pixel_format = PIXFORMAT_JPEG;
+  config.grab_mode    = CAMERA_GRAB_WHEN_EMPTY;
+  config.fb_location  = CAMERA_FB_IN_PSRAM;
   config.jpeg_quality = 12;
   config.fb_count     = 1;
 
+  if (config.pixel_format == PIXFORMAT_JPEG) {
+    if (psramFound()) {
+      config.jpeg_quality = 10;
+      config.fb_count     = 2;
+      config.grab_mode    = CAMERA_GRAB_LATEST;
+    } else {
+      config.frame_size   = FRAMESIZE_SVGA;
+      config.fb_location  = CAMERA_FB_IN_DRAM;
+    }
+  } else {
+    config.frame_size = FRAMESIZE_240X240;
+  #if CONFIG_IDF_TARGET_ESP32S3
+    config.fb_count = 2;
+  #endif
+  }
+
   esp_err_t err = esp_camera_init(&config);
   if (err != ESP_OK) {
-    Serial.printf("[CAM] Init failed 0x%x\n", err);
+    Serial.printf("[CAM] Init failed with error 0x%x\n", err);
     return false;
   }
   Serial.println("[CAM] Init OK");
