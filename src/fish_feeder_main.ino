@@ -33,6 +33,9 @@ int lastFeedDayEvening = -1;
 int lastMotionScore     = -1;
 int feedSequence        = 0;   // increments every time a feed happens
 
+// Feed kind: 0 = none, 1 = morning, 2 = evening, 3 = adhoc
+int lastFeedKind        = 0;
+
 // Camera pin config for XIAO ESP32S3 Sense
 #define PWDN_GPIO_NUM     -1
 #define RESET_GPIO_NUM    -1
@@ -75,6 +78,7 @@ void performFeed() {
 
 void performFeedWithCapture() {
   Serial.println("[FEED] Capture before/after (ephemeral)");
+  // lastFeedKind should be set by the caller before invoking this
 
   camera_fb_t* before = esp_camera_fb_get();
   if (!before) {
@@ -177,6 +181,7 @@ void handleRoot() {
 }
 
 void handleFeedNow() {
+  lastFeedKind = 3; // adhoc/manual feed
   performFeedWithCapture();
   server.send(200, "text/plain", "Feeding (with capture) triggered\n");
 }
@@ -218,7 +223,8 @@ void handleStatus() {
 
   json += "\"lastFeed\":{";
   json += "\"motionScore\":" + String(lastMotionScore) + ",";
-  json += "\"seq\":" + String(feedSequence);
+  json += "\"seq\":" + String(feedSequence) + ",";
+  json += "\"kind\":" + String(lastFeedKind);
   json += "}}";
 
   server.send(200, "application/json", json);
@@ -296,6 +302,7 @@ void loop() {
   if (now.hour() == FEED_MORNING_HOUR && now.minute() == FEED_MORNING_MIN) {
     if (lastFeedDayMorning != now.day()) {
       Serial.println("[SCHED] Morning feed triggered");
+      lastFeedKind = 1; // morning
       performFeedWithCapture();
       lastFeedDayMorning = now.day();
     }
@@ -305,6 +312,7 @@ void loop() {
   if (now.hour() == FEED_EVENING_HOUR && now.minute() == FEED_EVENING_MIN) {
     if (lastFeedDayEvening != now.day()) {
       Serial.println("[SCHED] Evening feed triggered");
+      lastFeedKind = 2; // evening
       performFeedWithCapture();
       lastFeedDayEvening = now.day();
     }
