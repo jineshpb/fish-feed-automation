@@ -29,7 +29,12 @@ const int FEED_EVENING_MIN  = 0;
 int lastFeedDayMorning = -1;
 int lastFeedDayEvening = -1;
 
-// Camera pin config for XIAO ESP32S3 Sense (may need tweaking to match Seeed example)
+// Last feed activity capture
+camera_fb_t* lastBefore = nullptr;
+camera_fb_t* lastAfter  = nullptr;
+int lastMotionScore     = -1;
+
+// Camera pin config for XIAO ESP32S3 Sense
 #define PWDN_GPIO_NUM     -1
 #define RESET_GPIO_NUM    -1
 #define XCLK_GPIO_NUM     10
@@ -48,7 +53,18 @@ int lastFeedDayEvening = -1;
 #define HREF_GPIO_NUM     47
 #define PCLK_GPIO_NUM     13
 
-// ====== FEEDING ======
+// ====== FEEDING / ACTIVITY CAPTURE ======
+void freeLastFrames() {
+  if (lastBefore) { esp_camera_fb_return(lastBefore); lastBefore = nullptr; }
+  if (lastAfter)  { esp_camera_fb_return(lastAfter);  lastAfter  = nullptr; }
+}
+
+int computeMotionScore(camera_fb_t* a, camera_fb_t* b) {
+  if (!a || !b) return -1;
+  // v0 heuristic: difference in JPEG size
+  return abs((int)a->len - (int)b->len);
+}
+
 void performFeed() {
   Serial.println("[FEED] Feeding started");
 
@@ -61,6 +77,21 @@ void performFeed() {
   delay(SERVO_FEED_DELAY_MS);
 
   Serial.println("[FEED] Feeding done");
+}
+
+void performFeedWithCapture() {
+  Serial.println("[FEED] Capture before/after");
+
+  freeLastFrames();
+  lastBefore = esp_camera_fb_get();
+
+  performFeed();
+
+  lastAfter = esp_camera_fb_get();
+  lastMotionScore = computeMotionScore(lastBefore, lastAfter);
+
+  Serial.print("[FEED] Motion score: ");
+  Serial.println(lastMotionScore);
 }
 
 // ====== CAMERA ======
@@ -128,6 +159,7 @@ void handleRoot() {
     <h1>Fish Feeder</h1>
     <p><a href="/feed-now"><button>Feed Now</button></a></p>
     <p><img src="/snapshot" style="max-width: 100%; height: auto;"></p>
+    <p><a href="/status">Status JSON</a></p>
   </body>
 </html>
 )HTML";
@@ -135,8 +167,8 @@ void handleRoot() {
 }
 
 void handleFeedNow() {
-  performFeed();
-  server.send(200, "text/plain", "Feeding triggered\n");
+  performFeedWithCapture();
+  server.send(200, "text/plain", "Feeding (with capture) triggered\n");
 }
 
 void handleSnapshot() {
@@ -150,6 +182,71 @@ void handleSnapshot() {
   WiFiClient client = server.client();
   client.write(fb->buf, fb->len);
   esp_camera_fb_return(fb);
+}
+
+void handleLastBefore() {
+  if (!lastBefore) {
+    server.send(404, "text/plain", "No before frame yet");
+    return;
+  }
+  server.setContentLength(lastBefore->len);
+  server.send(200, "image/jpeg", "");
+  WiFiClient client = server.client();
+  client.write(lastBefore->buf, lastBefore->len);
+}
+
+void handleLastAfter() {
+  if (!lastAfter) {
+    server.send(404, "text/plain", "No after frame yet");
+    return;
+  }
+  server.setContentLength(lastAfter->len);
+  server.send(200, "image/jpeg", "");
+  WiFiClient client = server.client();
+  client.write(lastAfter->buf, lastAfter->len);
+}
+
+void handleStatus() {
+  DateTime now = rtc.now();
+  String json = "{";
+
+  json += "\"time\":{";
+  json += "\"year\":" + String(now.year()) + ",";
+  json += "\"month\":" + String(now.month()) + ",";
+  json += "\"day\":" + String(now.day()) + ",";
+  json += "\"hour\":" + String(now.hour()) + ",";
+  json += "\"minute\":" + String(now.minute()) + ",";
+  json += "\"second\":" + String(now.second()) + "},";
+
+  json += "\"morning\":{";
+  json += "\"hour\":" + String(FEED_MORNING_HOUR) + ",";
+  json += "\"minute\":" + String(FEED_MORNING_MIN) + ",";
+  json += "\"fedToday\":" + String(lastFeedDayMorning == now.day() ? "true" : "false") + "},";
+
+  json += "\"evening\":{";
+  json += "\"hour\":" + String(FEED_EVENING_HOUR) + ",";
+  json += "\"minute\":" + String(FEED_EVENING_MIN) + ",";
+  json += "\"fedToday\":" + String(lastFeedDayEvening == now.day() ? "true" : "false") + "},";
+
+  json += "\"lastFeed\":{";
+  json += "\"motionScore\":" + String(lastMotionScore);
+  json += "}}";
+
+  server.send(200, "application/json", json);
+}
+
+void handleSetTime() {
+  if (!server.hasArg("epoch")) {
+    server.send(400, "text/plain", "Missing epoch param\n");
+    return;
+  }
+  unsigned long epoch = server.arg("epoch").toInt();
+  if (epoch == 0) {
+    server.send(400, "text/plain", "Invalid epoch\n");
+    return;
+  }
+  rtc.adjust(DateTime(epoch));
+  server.send(200, "text/plain", "RTC updated\n");
 }
 
 // ====== SETUP / LOOP ======
@@ -166,9 +263,7 @@ void setup() {
     Serial.println("[RTC] Failed to initialize RTC (DS3231)");
   } else {
     if (rtc.lostPower()) {
-      Serial.println("[RTC] RTC lost power, set the time in code once then remove this.");
-      // Example: set to compile time once, then disable this block after it sticks.
-      // rtc.adjust(DateTime(F(__DATE__), F(__TIME__)));
+      Serial.println("[RTC] RTC lost power, set the time via /set-time once.");
     }
   }
 
@@ -195,6 +290,11 @@ void setup() {
   server.on("/", handleRoot);
   server.on("/feed-now", handleFeedNow);
   server.on("/snapshot", handleSnapshot);
+  server.on("/last-before", handleLastBefore);
+  server.on("/last-after", handleLastAfter);
+  server.on("/status", handleStatus);
+  server.on("/set-time", handleSetTime);
+
   server.begin();
   Serial.println("HTTP server started");
 }
@@ -203,25 +303,23 @@ void loop() {
   server.handleClient();
 
   // Simple RTC-based scheduler: feed at 09:00 and 21:00 once per day
-  if (rtc.begin()) {
-    DateTime now = rtc.now();
+  DateTime now = rtc.now();
 
-    // Morning feed
-    if (now.hour() == FEED_MORNING_HOUR && now.minute() == FEED_MORNING_MIN) {
-      if (lastFeedDayMorning != now.day()) {
-        Serial.println("[SCHED] Morning feed triggered");
-        performFeed();
-        lastFeedDayMorning = now.day();
-      }
+  // Morning feed
+  if (now.hour() == FEED_MORNING_HOUR && now.minute() == FEED_MORNING_MIN) {
+    if (lastFeedDayMorning != now.day()) {
+      Serial.println("[SCHED] Morning feed triggered");
+      performFeedWithCapture();
+      lastFeedDayMorning = now.day();
     }
+  }
 
-    // Evening feed
-    if (now.hour() == FEED_EVENING_HOUR && now.minute() == FEED_EVENING_MIN) {
-      if (lastFeedDayEvening != now.day()) {
-        Serial.println("[SCHED] Evening feed triggered");
-        performFeed();
-        lastFeedDayEvening = now.day();
-      }
+  // Evening feed
+  if (now.hour() == FEED_EVENING_HOUR && now.minute() == FEED_EVENING_MIN) {
+    if (lastFeedDayEvening != now.day()) {
+      Serial.println("[SCHED] Evening feed triggered");
+      performFeedWithCapture();
+      lastFeedDayEvening = now.day();
     }
   }
 }
