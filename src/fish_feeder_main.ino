@@ -4,6 +4,7 @@
 #include <Wire.h>
 #include "RTClib.h"
 #include "esp_camera.h"
+#include <Adafruit_NeoPixel.h>
 
 // ====== CONFIG ======
 const char* WIFI_SSID     = "YOUR_SSID";
@@ -14,10 +15,19 @@ const int SERVO_FEED_START = 0;    // resting angle
 const int SERVO_FEED_END   = 180;  // 180° feed rotation
 const int SERVO_FEED_DELAY_MS = 800; // time to reach angle
 
+// LED config: 6x WS2812B on GPIO1, powered from ESP32 USB 5V
+const int LED_PIN = 1;            // GPIO1 (D0)
+const int LED_COUNT = 6;          // 6 individual WS2812B LEDs
+const int LED_BRIGHTNESS = 50;    // 0-255, conservative default
+
 // ====== GLOBALS ======
 WebServer server(80);
 Servo feederServo;
 RTC_DS3231 rtc;  // real-time clock (DS3231)
+Adafruit_NeoPixel strip(LED_COUNT, LED_PIN, NEO_GRB + NEO_KHZ800);
+
+// LED state
+uint8_t ledMode = 0;  // 0=off, 1=ambient, 2=feeding, 3=solid
 
 // Feed schedule: morning and evening at 09:00 and 21:00
 const int FEED_MORNING_HOUR = 9;
@@ -55,6 +65,73 @@ int lastFeedKind        = 0;
 #define HREF_GPIO_NUM     47
 #define PCLK_GPIO_NUM     13
 
+// ====== LED FUNCTIONS ======
+void ledOff() {
+  strip.clear();
+  strip.show();
+  ledMode = 0;
+}
+
+void ledSolid(uint8_t r, uint8_t g, uint8_t b, uint8_t brightness) {
+  strip.setBrightness(brightness);
+  for (int i = 0; i < LED_COUNT; i++) {
+    strip.setPixelColor(i, strip.Color(r, g, b));
+  }
+  strip.show();
+}
+
+void ledFeedingIndicator() {
+  // Green pulse across all 6 LEDs to signal feeding
+  uint8_t prevMode = ledMode;
+  ledMode = 2;
+  for (int cycle = 0; cycle < 3; cycle++) {
+    ledSolid(0, 255, 0, 80);
+    delay(200);
+    ledSolid(0, 80, 0, 30);
+    delay(200);
+  }
+  // Return to off after feed indicator (caller can set ambient after)
+  ledOff();
+  ledMode = prevMode;
+}
+
+void ledAmbient(int hour) {
+  ledMode = 1;
+  if (hour >= 7 && hour < 10) {
+    // Morning: warm sunrise orange
+    ledSolid(255, 120, 20, 40);
+  } else if (hour >= 10 && hour < 17) {
+    // Daytime: cool white-blue
+    ledSolid(180, 200, 255, 60);
+  } else if (hour >= 17 && hour < 21) {
+    // Evening: warm sunset
+    ledSolid(255, 80, 10, 40);
+  } else {
+    // Night: dim blue moonlight
+    ledSolid(0, 0, 40, 15);
+  }
+}
+
+void ledStatusWiFiError() {
+  // Solid red on first LED only as a status indicator
+  strip.setBrightness(40);
+  strip.setPixelColor(0, strip.Color(255, 0, 0));
+  for (int i = 1; i < LED_COUNT; i++) strip.setPixelColor(i, 0);
+  strip.show();
+}
+
+void ledStatusRTCError() {
+  // Yellow blink on first LED
+  strip.setBrightness(40);
+  strip.setPixelColor(0, strip.Color(255, 200, 0));
+  for (int i = 1; i < LED_COUNT; i++) strip.setPixelColor(i, 0);
+  strip.show();
+  delay(300);
+  strip.setPixelColor(0, 0);
+  strip.show();
+  delay(300);
+}
+
 // ====== FEEDING / ACTIVITY CAPTURE ======
 int computeMotionScore(camera_fb_t* a, camera_fb_t* b) {
   if (!a || !b) return -1;
@@ -79,6 +156,9 @@ void performFeed() {
 void performFeedWithCapture() {
   Serial.println("[FEED] Capture before/after (ephemeral)");
   // lastFeedKind should be set by the caller before invoking this
+
+  // Flash green LEDs as feeding indicator
+  ledFeedingIndicator();
 
   camera_fb_t* before = esp_camera_fb_get();
   if (!before) {
@@ -173,6 +253,8 @@ void handleRoot() {
     <h1>Fish Feeder</h1>
     <p><a href="/feed-now"><button>Feed Now</button></a></p>
     <p><img src="/snapshot" style="max-width: 100%; height: auto;"></p>
+    <p><a href="/led?mode=ambient"><button>LED Ambient</button></a>
+       <a href="/led?mode=off"><button>LED Off</button></a></p>
     <p><a href="/status">Status JSON</a></p>
   </body>
 </html>
@@ -224,10 +306,49 @@ void handleStatus() {
   json += "\"lastFeed\":{";
   json += "\"motionScore\":" + String(lastMotionScore) + ",";
   json += "\"seq\":" + String(feedSequence) + ",";
-  json += "\"kind\":" + String(lastFeedKind);
+  json += "\"kind\":" + String(lastFeedKind) + "},";
+
+  // LED state
+  String ledModeStr;
+  switch (ledMode) {
+    case 0: ledModeStr = "off"; break;
+    case 1: ledModeStr = "ambient"; break;
+    case 2: ledModeStr = "feeding"; break;
+    case 3: ledModeStr = "solid"; break;
+    default: ledModeStr = "unknown"; break;
+  }
+  json += "\"led\":{";
+  json += "\"mode\":\"" + ledModeStr + "\",";
+  json += "\"count\":" + String(LED_COUNT) + ",";
+  json += "\"brightness\":" + String(strip.getBrightness());
   json += "}}";
 
   server.send(200, "application/json", json);
+}
+
+void handleLed() {
+  String mode = server.arg("mode");
+
+  if (mode == "off") {
+    ledOff();
+  } else if (mode == "ambient") {
+    DateTime now = rtc.now();
+    ledAmbient(now.hour());
+  } else if (mode == "feed") {
+    ledFeedingIndicator();
+  } else if (mode == "solid") {
+    uint8_t r = server.arg("r").toInt();
+    uint8_t g = server.arg("g").toInt();
+    uint8_t b = server.arg("b").toInt();
+    uint8_t br = server.hasArg("brightness") ? server.arg("brightness").toInt() : 50;
+    ledSolid(r, g, b, br);
+    ledMode = 3;
+  } else {
+    server.send(400, "text/plain", "Unknown mode. Use: off, ambient, feed, solid\n");
+    return;
+  }
+
+  server.send(200, "text/plain", "LED mode: " + mode + "\n");
 }
 
 void handleSetTime() {
@@ -248,6 +369,11 @@ void handleSetTime() {
 void setup() {
   Serial.begin(115200);
   delay(1000);
+
+  // LED strip
+  strip.begin();
+  strip.setBrightness(LED_BRIGHTNESS);
+  strip.show();  // all off
 
   // Servo
   feederServo.attach(SERVO_PIN);
@@ -287,6 +413,7 @@ void setup() {
   server.on("/snapshot", handleSnapshot);
   server.on("/status", handleStatus);
   server.on("/set-time", handleSetTime);
+  server.on("/led", handleLed);
 
   server.begin();
   Serial.println("HTTP server started");
@@ -316,5 +443,12 @@ void loop() {
       performFeedWithCapture();
       lastFeedDayEvening = now.day();
     }
+  }
+
+  // Update ambient LEDs every 60s (only if in ambient mode)
+  static unsigned long lastLedUpdate = 0;
+  if (ledMode == 1 && millis() - lastLedUpdate > 60000) {
+    ledAmbient(now.hour());
+    lastLedUpdate = millis();
   }
 }
